@@ -1,6 +1,8 @@
 import cv
 import cv2
+import math
 import numpy as np
+from numpy import linalg
 from matplotlib import pyplot as plt
 
 def showImage(img1, 
@@ -91,6 +93,45 @@ def drawMatches(img1, kp1, img2, kp2, matches):
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
+def findDimensions(image, homography):
+
+    base_p1 = np.ones(3, np.float32)
+    base_p2 = np.ones(3, np.float32)
+    base_p3 = np.ones(3, np.float32)
+    base_p4 = np.ones(3, np.float32)
+
+    (y, x) = image.shape[:2]
+
+    base_p1[:2] = [0,0]
+    base_p2[:2] = [x,0]
+    base_p3[:2] = [0,y]
+    base_p4[:2] = [x,y]
+
+    max_x = None
+    max_y = None
+    min_x = None
+    min_y = None
+
+    for pt in [base_p1, base_p2, base_p3, base_p4]:
+
+        hp = np.matrix(homography, np.float32) * np.matrix(pt, np.float32).T
+        hp_arr = np.array(hp, np.float32)
+        normal_pt = np.array([hp_arr[0]/hp_arr[2], hp_arr[1]/hp_arr[2]], np.float32)
+
+        if ( max_x == None or normal_pt[0,0] > max_x ):
+            max_x = normal_pt[0,0]
+        if ( max_y == None or normal_pt[1,0] > max_y ):
+            max_y = normal_pt[1,0]
+        if ( min_x == None or normal_pt[0,0] < min_x ):
+            min_x = normal_pt[0,0]
+        if ( min_y == None or normal_pt[1,0] < min_y ):
+            min_y = normal_pt[1,0]
+
+    min_x = min(0, min_x)
+    min_y = min(0, min_y)
+
+    return (min_x, min_y, max_x, max_y)
+
 
 if __name__ == '__main__':
     cam0 = cv2.VideoCapture(0)
@@ -103,22 +144,22 @@ if __name__ == '__main__':
     while (True):
 
         ret1, frame1 = cam0.read()
-        h, w = frame1.shape[:2]
-        newcameramtx, roi=cv2.getOptimalNewCameraMatrix(cam0mtx,cam0dist,(w,h),1,(w,h))
+        #h, w = frame1.shape[:2]
+        #newcameramtx, roi=cv2.getOptimalNewCameraMatrix(cam0mtx,cam0dist,(w,h),1,(w,h))
         # undistort
-        frame1 = cv2.undistort(frame1, cam0mtx, cam0dist, None, newcameramtx)
+        #frame1 = cv2.undistort(frame1, cam0mtx, cam0dist, None, newcameramtx)
         # crop the image
-        x,y,w,h = roi
-        frame1 = frame1[y:y+h, x:x+w]
+        #x,y,w,h = roi
+        #frame1 = frame1[y:y+h, x:x+w]
 
         ret2, frame2 = cam2.read()
-        h, w = frame2.shape[:2]
-        newcameramtx, roi=cv2.getOptimalNewCameraMatrix(cam2mtx,cam2dist,(w,h),1,(w,h))
+        #h, w = frame2.shape[:2]
+        #newcameramtx, roi=cv2.getOptimalNewCameraMatrix(cam2mtx,cam2dist,(w,h),1,(w,h))
         # undistort
-        frame2 = cv2.undistort(frame2, cam2mtx, cam2dist, None, newcameramtx)
+        #frame2 = cv2.undistort(frame2, cam2mtx, cam2dist, None, newcameramtx)
         # crop the image
-        x,y,w,h = roi
-        frame2 = frame2[y:y+h, x:x+w]
+        #x,y,w,h = roi
+        #frame2 = frame2[y:y+h, x:x+w]
 
         # Use the SIFT feature detector
         detector = cv2.SIFT()
@@ -135,7 +176,6 @@ if __name__ == '__main__':
             f1_key_points.append((int(kp.pt[0]),int(kp.pt[1])))
         showImage(frame1_blur, f1_key_points, 'frame1')
 
-
         # Convert and blur frame2 image
         frame2_blur = cv2.GaussianBlur(cv2.cvtColor(frame2.copy(), cv2.COLOR_BGR2GRAY), (5,5), 0)
         
@@ -150,11 +190,90 @@ if __name__ == '__main__':
 
         # BFMatcher with default params
         bf = cv2.BFMatcher()
-        matches = bf.knnMatch(f1_descs,f2_descs, k=2)
+        matches = bf.knnMatch(f2_descs,trainDescriptors=f1_descs, k=2)
         matches = [m[0] for m in matches if len(m) == 2 and m[0].distance < 0.5*m[1].distance]
 
-        img3 = drawMatches(frame1_blur,f1_features,frame2_blur,f2_features,matches)
-        plt.imshow(img3),plt.show()
+        # Create Homography matrix
+        kp1 = [f1_features[match.trainIdx] for match in matches]
+        kp2 = [f2_features[match.queryIdx] for match in matches]
+        p1 = np.array([k.pt for k in kp1])
+        p2 = np.array([k.pt for k in kp2])
+        H, status = cv2.findHomography(p1, p2, cv2.RANSAC, 5.0)
+
+        # Normalize and invert
+        H = H / H[2,2]
+        H_inv = linalg.inv(H)
+
+        (min_x, min_y, max_x, max_y) = findDimensions(frame2_blur, H_inv)
+        
+        # Adjust max_x and max_y frame1 size
+        max_x = max(max_x, frame1_blur.shape[1])
+        max_y = max(max_y, frame1_blur.shape[0])
+
+        move_h = np.matrix(np.identity(3), np.float32)
+
+        if (min_x < 0):
+            move_h[0,2] += -min_x
+            max_x += -min_x
+
+        if (min_y < 0):
+            move_h[1,2] += -min_y
+            max_y += -min_y
+
+        mod_inv_h = move_h * H_inv
+
+        img_w = int(math.ceil(max_x))
+        img_h = int(math.ceil(max_y))
+
+        # Warp the new image given the homography from the old image
+        frame1_warp = cv2.warpPerspective(frame1, move_h, (img_w, img_h))
+        frame2_warp = cv2.warpPerspective(frame2, mod_inv_h, (img_w, img_h))
+
+        cv2.imshow("cam0", frame1_warp)
+        cv2.imshow("cam2", frame2_warp)
+
+
+        # Put the base image on an enlarged palette
+        enlarged_base_img = np.zeros((img_h, img_w, 3), np.uint8)
+
+        # Create a mask from the warped image for constructing masked composite
+        (ret,data_map) = cv2.threshold(cv2.cvtColor(frame2_warp, cv2.COLOR_BGR2GRAY), 
+            0, 255, cv2.THRESH_BINARY)
+
+        enlarged_base_img = cv2.add(enlarged_base_img, frame1_warp,
+                                    mask=np.bitwise_not(data_map), dtype=cv2.CV_8U)
+
+        # Now add the warped image
+        final_img = cv2.add(enlarged_base_img, frame2_warp, dtype=cv2.CV_8U)
+
+        # Crop off the black edges
+        final_gray = cv2.cvtColor(final_img, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(final_gray, 1, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+        max_area = 0
+        best_rect = (0,0,0,0)
+
+        for cnt in contours:
+            x,y,w,h = cv2.boundingRect(cnt)
+            deltaHeight = h-y
+            deltaWidth = w-x
+            area = deltaHeight * deltaWidth
+            if ( area > max_area and deltaHeight > 0 and deltaWidth > 0):
+                max_area = area
+                best_rect = (x,y,w,h)
+
+        if (max_area > 0):
+            final_img = final_img[best_rect[1]:best_rect[1]+best_rect[3],
+                                  best_rect[0]:best_rect[0]+best_rect[2]]
+
+        cv2.imshow("teste", final_img)
+#        img3 = drawMatches(frame1_blur,f1_features,frame2_blur,f2_features,matches)
+#        plt.imshow(img3),plt.show()
+
+        
+
+
 
 
 
